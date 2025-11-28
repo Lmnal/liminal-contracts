@@ -1,0 +1,26 @@
+{
+  "lib/LayerZero-v2": {
+    "rev": "002a7fbeb22adf4f6eea1ddc6f7cca232afaf938"
+  },
+  "lib/devtools": {
+    "rev": "de203c58a2064092d1f8fc141c777cb44b8db76b"
+  },
+  "lib/forge-std": {
+    "rev": "8bbcf6e3f8f62f419e5429a0bd89331c85c37824"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "c64a1edb67b6e3f4a15cca8909c9482ad33a02b0"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "e725abddf1e01cf05ace496e950fc8e243cc7cab"
+  },
+  "lib/openzeppelin-foundry-upgrades": {
+    "rev": "cfd861bc18ef4737e82eae6ec75304e27af699ef"
+  },
+  "lib/pyth-sdk-solidity": {
+    "rev": "11d6bcfc2e56885535a9a8e3c8417847cb20be14"
+  },
+  "lib/solidity-bytes-utils": {
+    "rev": "fc502455bb2a7e26a743378df042612dd50d1eb9"
+  }
+}
