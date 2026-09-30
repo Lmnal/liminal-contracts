@@ -82,6 +82,13 @@ contract DepositPipe is
     event DepositProcessed(
         address indexed depositor, address indexed receiver, uint256 assetsIn, uint256 sharesOut
     );
+    event DepositWithReferral(
+        address indexed depositor,
+        address indexed receiver,
+        uint256 assets,
+        uint256 shares,
+        bytes32 indexed referralCode
+    );
     event StrategistUpdated(address indexed oldStrategist, address indexed newStrategist);
 
     event TimeLockControllerUpdated(address indexed oldTimeLockController, address indexed newTimeLockController);
@@ -176,7 +183,7 @@ contract DepositPipe is
      * @return shares Amount of shares minted
      */
     function deposit(uint256 assets, address receiver) public virtual override returns (uint256 shares) {
-        return deposit(assets, receiver, msg.sender, 0);
+        return _deposit(assets, receiver, msg.sender, uint256(0), bytes32(0));
     }
 
     /**
@@ -187,7 +194,7 @@ contract DepositPipe is
      * @return shares Amount of shares minted
      */
     function deposit(uint256 assets, address receiver, address controller) public returns (uint256 shares) {
-        return deposit(assets, receiver, controller, 0);
+        return _deposit(assets, receiver, controller, uint256(0), bytes32(0));
     }
 
     /**
@@ -198,7 +205,64 @@ contract DepositPipe is
      * @return shares Amount of shares minted
      */
     function deposit(uint256 assets, address receiver, uint256 minShares) public returns (uint256 shares) {
-        return deposit(assets, receiver, msg.sender, minShares);
+        return _deposit(assets, receiver, msg.sender, minShares, bytes32(0));
+    }
+
+    /**
+     * @notice Deposit assets with referral code for tracking
+     * @param assets Amount of deposit asset
+     * @param receiver Address to receive shares
+     * @param referralCode Referral code for reward attribution
+     * @return shares Amount of shares minted
+     */
+    function deposit(uint256 assets, address receiver, bytes32 referralCode) public returns (uint256 shares) {
+        return _deposit(assets, receiver, msg.sender, uint256(0), referralCode);
+    }
+
+    /**
+     * @notice Deposit with controller and referral code
+     * @param assets Amount of deposit asset
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param referralCode Referral code for reward attribution
+     * @return shares Amount of shares minted
+     */
+    function deposit(uint256 assets, address receiver, address controller, bytes32 referralCode)
+        public
+        returns (uint256 shares)
+    {
+        return _deposit(assets, receiver, controller, uint256(0), referralCode);
+    }
+
+    /**
+     * @notice Deposit with slippage protection and referral code
+     * @param assets Amount of deposit asset
+     * @param receiver Address to receive shares
+     * @param minShares Minimum shares to receive (slippage protection)
+     * @param referralCode Referral code for reward attribution
+     * @return shares Amount of shares minted
+     */
+    function deposit(uint256 assets, address receiver, uint256 minShares, bytes32 referralCode)
+        public
+        returns (uint256 shares)
+    {
+        return _deposit(assets, receiver, msg.sender, minShares, referralCode);
+    }
+
+    /**
+     * @notice Deposit with controller, slippage protection, and referral code
+     * @param assets Amount of deposit asset
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param minShares Minimum shares to receive (slippage protection)
+     * @param referralCode Referral code for reward attribution
+     * @return shares Amount of shares minted
+     */
+    function deposit(uint256 assets, address receiver, address controller, uint256 minShares, bytes32 referralCode)
+        public
+        returns (uint256 shares)
+    {
+        return _deposit(assets, receiver, controller, minShares, referralCode);
     }
 
     /**
@@ -211,6 +275,21 @@ contract DepositPipe is
      */
     function deposit(uint256 assets, address receiver, address controller, uint256 minShares)
         public
+        returns (uint256 shares)
+    {
+        return _deposit(assets, receiver, controller, minShares, bytes32(0));
+    }
+
+    /**
+     * @notice Deposit with controller and slippage protection
+     * @param assets Amount of deposit asset
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param minShares Minimum shares to receive (slippage protection)
+     * @return shares Amount of shares minted
+     */
+    function _deposit(uint256 assets, address receiver, address controller, uint256 minShares, bytes32 referralCode)
+        internal
         whenNotPaused
         nonReentrant
         accruePerformanceFee
@@ -253,6 +332,10 @@ contract DepositPipe is
         emit DepositProcessed(controller, receiver, assets, shares);
         emit Deposit(msg.sender, receiver, assets, shares);
 
+        if (referralCode != bytes32(0)) {
+            emit DepositWithReferral(msg.sender, receiver, assets, shares, referralCode);
+        }
+
         return shares;
     }
 
@@ -263,7 +346,7 @@ contract DepositPipe is
      * @return assets Amount of assets required
      */
     function mint(uint256 shares, address receiver) public virtual returns (uint256 assets) {
-        return mint(shares, receiver, msg.sender);
+        return _mint(shares, receiver, msg.sender, type(uint256).max, bytes32(0));
     }
 
     /**
@@ -274,7 +357,7 @@ contract DepositPipe is
      * @return assets Amount of assets required
      */
     function mint(uint256 shares, address receiver, address controller) public returns (uint256 assets) {
-        return mint(shares, receiver, controller, type(uint256).max);
+        return _mint(shares, receiver, controller, type(uint256).max, bytes32(0));
     }
 
     /**
@@ -285,7 +368,7 @@ contract DepositPipe is
      * @return assets Amount of assets required
      */
     function mint(uint256 shares, address receiver, uint256 maxAssets) public returns (uint256 assets) {
-        return mint(shares, receiver, msg.sender, maxAssets);
+        return _mint(shares, receiver, msg.sender, maxAssets, bytes32(0));
     }
 
     /**
@@ -298,6 +381,79 @@ contract DepositPipe is
      */
     function mint(uint256 shares, address receiver, address controller, uint256 maxAssets)
         public
+        returns (uint256 assets)
+    {
+        return _mint(shares, receiver, controller, maxAssets, bytes32(0));
+    }
+
+    /**
+     * @notice Mint shares with referral code
+     * @param shares Amount of shares to mint
+     * @param receiver Address to receive shares
+     * @param referralCode Referral code for reward attribution
+     * @return assets Amount of assets required
+     */
+    function mint(uint256 shares, address receiver, bytes32 referralCode) public returns (uint256 assets) {
+        return _mint(shares, receiver, msg.sender, type(uint256).max, referralCode);
+    }
+
+    /**
+     * @notice Mint shares with controller and referral code
+     * @param shares Amount of shares to mint
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param referralCode Referral code for reward attribution
+     * @return assets Amount of assets required
+     */
+    function mint(uint256 shares, address receiver, address controller, bytes32 referralCode)
+        public
+        returns (uint256 assets)
+    {
+        return _mint(shares, receiver, controller, type(uint256).max, referralCode);
+    }
+
+    /**
+     * @notice Mint shares with slippage protection and referral code
+     * @param shares Amount of shares to mint
+     * @param receiver Address to receive shares
+     * @param maxAssets Maximum assets to spend (slippage protection)
+     * @param referralCode Referral code for reward attribution
+     * @return assets Amount of assets required
+     */
+    function mint(uint256 shares, address receiver, uint256 maxAssets, bytes32 referralCode)
+        public
+        returns (uint256 assets)
+    {
+        return _mint(shares, receiver, msg.sender, maxAssets, referralCode);
+    }
+
+    /**
+     * @notice Mint with controller, slippage protection, and referral code
+     * @param shares Amount of shares to mint
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param maxAssets Maximum assets to spend (slippage protection)
+     * @param referralCode Referral code for reward attribution
+     * @return assets Amount of assets required
+     */
+    function mint(uint256 shares, address receiver, address controller, uint256 maxAssets, bytes32 referralCode)
+        public
+        returns (uint256 assets)
+    {
+        return _mint(shares, receiver, controller, maxAssets, referralCode);
+    }
+
+    /**
+     * @notice Internal mint implementation
+     * @param shares Amount of shares to mint
+     * @param receiver Address to receive shares
+     * @param controller Address that owns the assets
+     * @param maxAssets Maximum assets to spend (slippage protection)
+     * @param referralCode Referral code for reward attribution
+     * @return assets Amount of assets required
+     */
+    function _mint(uint256 shares, address receiver, address controller, uint256 maxAssets, bytes32 referralCode)
+        internal
         whenNotPaused
         nonReentrant
         accruePerformanceFee
@@ -340,6 +496,10 @@ contract DepositPipe is
 
         emit DepositProcessed(controller, receiver, assets, shares);
         emit Deposit(msg.sender, receiver, assets, shares);
+
+        if (referralCode != bytes32(0)) {
+            emit DepositWithReferral(msg.sender, receiver, assets, shares, referralCode);
+        }
 
         return assets;
     }

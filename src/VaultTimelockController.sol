@@ -41,11 +41,11 @@ contract VaultTimelockController is TimelockControllerUpgradeable {
     }
     /// @notice Time delay constants
 
-    uint256 public constant MIN_FUNCTION_DELAY = 1 hours;
-    uint256 public constant RECOVERY_DELAY = 12 hours;
-    uint256 public constant MIN_DEFAULT_DELAY = 12 hours;
-    uint256 public constant PARAMETER_DELAY = 24 hours;
-    uint256 public constant ORACLE_DELAY = 36 hours;
+    uint256 public constant MIN_FUNCTION_DELAY = 2 days;
+    uint256 public constant RECOVERY_DELAY = 2 days;
+    uint256 public constant MIN_DEFAULT_DELAY = 2 days;
+    uint256 public constant PARAMETER_DELAY = 2 days;
+    uint256 public constant ORACLE_DELAY = 2 days;
     uint256 public constant CONFIG_DELAY = 48 hours;
     uint256 public constant ROLE_DELAY = 72 hours;
     uint256 public constant MAX_DELAY = 7 days;

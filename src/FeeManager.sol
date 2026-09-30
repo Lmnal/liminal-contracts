@@ -68,6 +68,7 @@ contract FeeManager is AccessControlUpgradeable, ReentrancyGuardUpgradeable {
     /// @notice Events
     event PerformanceFeeTaken(uint256 sharesMinted, uint256 feeInAssets, uint256 newHighWatermarkPPS);
     event NoPerformanceFeeTaken(uint256 currentPPS, uint256 highWatermarkPPS);
+    event PerformanceFeeAccrued(uint256 feeInAssets, uint256 totalAccrued, uint256 newPPS);
     event ManagementFeeTaken(uint256 sharesMinted, uint256 annualizedValue, uint256 timestamp);
     event FeeConfigUpdated(uint256 managementFeeBps, uint256 performanceFeeBps);
     event FeeReceiverUpdated(address indexed newReceiver);
@@ -183,6 +184,7 @@ contract FeeManager is AccessControlUpgradeable, ReentrancyGuardUpgradeable {
             
             // Update checkpoint for next accrual
             $.ppsTrack = currentPPS;
+            emit PerformanceFeeAccrued(feeInAssets, $.accruedPerformanceFeeInAssets, currentPPS);
         }
         
         // Always update supply and NAV tracking
@@ -191,12 +193,13 @@ contract FeeManager is AccessControlUpgradeable, ReentrancyGuardUpgradeable {
     }
 
     /**
-     * @notice Collect all accrued performance fees by minting shares
-     * @dev Accrues any new fees first, then mints shares for all accrued fees
+     * @notice Collect accrued performance fees by minting shares, with an optional cap
+     * @dev Accrues new fees first and retains any fees not collected under the cap
      * @dev This is the ONLY function that actually mints performance fee shares
+     * @param maxSharesMint Maximum shares to mint; zero collects without a cap
      * @return sharesMinted Amount of shares minted as fee
      */
-    function collectPerformanceFee() external onlySafeManager nonReentrant returns (uint256 sharesMinted) {
+    function collectPerformanceFee(uint256 maxSharesMint) external onlySafeManager nonReentrant returns (uint256 sharesMinted) {
         FeeManagerStorage storage $ = _getFeeManagerStorage();
         
         // First accrue any new performance fees
@@ -214,21 +217,26 @@ contract FeeManager is AccessControlUpgradeable, ReentrancyGuardUpgradeable {
         if (currentSupply == 0) return 0;
         
         // Convert all accrued fees to shares
-        uint256 feeInAssets = $.accruedPerformanceFeeInAssets;
-        uint256 navPostFee = currentNAV - feeInAssets;
-        sharesMinted = feeInAssets.mulDiv(currentSupply, navPostFee, Math.Rounding.Floor);
+        uint256 totalAccruedFees = $.accruedPerformanceFeeInAssets;
+        uint256 navPostFee = currentNAV - totalAccruedFees;
+        uint256 totalSharesForAllFees = totalAccruedFees.mulDiv(currentSupply, navPostFee, Math.Rounding.Floor);
         
+        sharesMinted =
+            maxSharesMint > 0 && totalSharesForAllFees > maxSharesMint ? maxSharesMint : totalSharesForAllFees;
+
         if (sharesMinted > 0) {
+            uint256 feeInAssetsCollected = sharesMinted.mulDiv(navPostFee, currentSupply, Math.Rounding.Floor);
+
             $.shareManager.mintFeesShares($.feeReceiver, sharesMinted);
             
-            // Reset accrued fees after minting
-            $.accruedPerformanceFeeInAssets = 0;
+            // Retain fees that were not collected
+            $.accruedPerformanceFeeInAssets -= feeInAssetsCollected;
             
             // Update tracking after minting
             $.lastSupplyForPerformance = $.shareManager.totalSupply();
             $.lastNAVForPerformance = currentNAV;
             
-            emit PerformanceFeeTaken(sharesMinted, feeInAssets, $.ppsTrack);
+            emit PerformanceFeeTaken(sharesMinted, feeInAssetsCollected, $.ppsTrack);
         }
         
         return sharesMinted;

@@ -80,6 +80,11 @@ contract OVaultMsgInspector is IOAppMsgInspector {
 
         bytes memory actualComposeMsg = _sliceBytes(_fullComposeMsg, 32, _fullComposeMsg.length - 32);
 
+        if (actualComposeMsg.length < 65) {
+            // Too short to be a valid OVaultComposer message, likely raw hook data - allow it
+            return;
+        }
+
         // Decode action type (first byte of the actual compose message)
         (uint8 action, bytes memory params) = abi.decode(actualComposeMsg, (uint8, bytes));
 
@@ -95,11 +100,14 @@ contract OVaultMsgInspector is IOAppMsgInspector {
 
     /**
      * @notice Validates deposit asset compose message parameters
-     * @param _params Encoded parameters: (address targetAsset, bytes32 receiver, SendParam sendParam, uint256 minMsgValue, bytes32 unused)
+     * @param _params ABI-encoded DepositParams struct, including originEid and referralCode
      */
     function _validateDepositAsset(bytes memory _params) internal pure {
-        (address targetAsset, bytes32 receiver, SendParam memory sendParam,,) =
-            abi.decode(_params, (address, bytes32, SendParam, uint256, bytes32));
+        require(_params.length > 32, "Invalid params length");
+        bytes memory structData = _sliceBytes(_params, 32, _params.length - 32);
+
+        (address targetAsset, bytes32 receiver, SendParam memory sendParam,,,,) =
+            abi.decode(structData, (address, bytes32, SendParam, uint256, bytes32, uint32, bytes32));
 
         // Validate target asset is not zero
         if (targetAsset == address(0)) revert InvalidTargetAsset();
@@ -115,11 +123,14 @@ contract OVaultMsgInspector is IOAppMsgInspector {
 
     /**
      * @notice Validates redeem shares compose message parameters
-     * @param _params Encoded parameters: (address receiver, SendParam sendParam, uint256 minMsgValue, uint256 minAssets)
+     * @param _params ABI-encoded RedeemParams struct, including originEid and customData
      */
     function _validateRedeemShares(bytes memory _params) internal pure {
-        (address receiver, SendParam memory sendParam,,) =
-            abi.decode(_params, (address, SendParam, uint256, uint256));
+        require(_params.length > 32, "Invalid params length");
+        bytes memory structData = _sliceBytes(_params, 32, _params.length - 32);
+
+        (address receiver, SendParam memory sendParam,,,,,) =
+            abi.decode(structData, (address, SendParam, uint256, uint256, bytes32, uint32, bytes32));
 
         // Validate receiver is not zero
         if (receiver == address(0)) revert InvalidReceiver();

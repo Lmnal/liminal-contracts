@@ -121,6 +121,7 @@ contract RedemptionPipe is
     event AssetsRecovered(address indexed token, uint256 amount, address indexed treasury);
     event LiquidityProviderUpdated(address indexed oldProvider, address indexed newProvider);
     event MaxCustomFeeBpsUpdated(uint256 newMaxCustomFeeBps);
+    event RedeemWithCustomData(bytes32 customData);
     event FastRedeemEnabledUpdated(bool enabled);
     event TimeLockControllerUpdated(address indexed oldTimeLockController, address indexed newTimeLockController);
 
@@ -358,6 +359,36 @@ contract RedemptionPipe is
         accruePerformanceFee
         returns (uint256 assets)
     {
+        return _redeem(shares, receiver, controller);
+    }
+
+    /**
+     * @notice Instant redemption with custom data emitted as event
+     * @param shares Amount of shares to redeem
+     * @param receiver Address to receive assets
+     * @param controller Address that controls the shares
+     * @param customData Arbitrary data (e.g., address to send the assets to, destination chain identifier)
+     * @return assets Amount of assets received
+     */
+    function redeemWithCustomData(uint256 shares, address receiver, address controller, bytes32 customData)
+        external
+        whenNotPaused
+        nonReentrant
+        accruePerformanceFee
+        returns (uint256 assets)
+    {
+        emit RedeemWithCustomData(customData);
+        return _redeem(shares, receiver, controller);
+    }
+
+    /**
+     * @notice Internal instant redemption logic
+     * @param shares Amount of shares to redeem
+     * @param receiver Address to receive assets
+     * @param controller Address that controls the shares
+     * @return assets Amount of assets received
+     */
+    function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         RedemptionPipeStorage storage $ = _getRedemptionPipeStorage();
 
         require(
@@ -416,6 +447,36 @@ contract RedemptionPipe is
         address receiver,
         address controller
     ) external whenNotPaused nonReentrant accruePerformanceFee returns (uint256 shares) {
+        return _withdraw(assets, receiver, controller);
+    }
+
+    /**
+     * @notice Instant withdrawal with custom data emitted as event
+     * @param assets Amount of assets to withdraw
+     * @param receiver Address to receive assets
+     * @param controller Address that controls the shares
+     * @param customData Arbitrary data (e.g., address to send the assets to, destination chain identifier)
+     * @return shares Amount of shares burned
+     */
+    function withdrawWithCustomData(uint256 assets, address receiver, address controller, bytes32 customData)
+        external
+        whenNotPaused
+        nonReentrant
+        accruePerformanceFee
+        returns (uint256 shares)
+    {
+        emit RedeemWithCustomData(customData);
+        return _withdraw(assets, receiver, controller);
+    }
+
+    /**
+     * @notice Internal instant withdrawal logic
+     * @param assets Amount of assets to withdraw
+     * @param receiver Address to receive assets
+     * @param controller Address that controls the shares
+     * @return shares Amount of shares burned
+     */
+    function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         RedemptionPipeStorage storage $ = _getRedemptionPipeStorage();
         
         require(
@@ -495,10 +556,14 @@ contract RedemptionPipe is
         uint256 totalPendingAfter = _getTotalPendingShares(owner) + shares;
         require(totalPendingAfter <= $.shareManager.maxWithdraw(), "RedemptionPipe: maximum redeem per user exceeded");
 
+        PendingFastRedeemRequest storage request = $.pendingFastRedeem[owner];
+        uint256 currentPendingShares = request.shares;
+        if (currentPendingShares > 0) {
+            require(request.receiver == receiver, "RedemptionPipe: receiver mismatch");
+        }
+
         // Transfer shares to this contract for custody
         $.shareManager.transferFrom(owner, address(this), shares);
-
-        uint256 currentPendingShares = $.pendingFastRedeem[owner].shares;
         $.pendingFastRedeem[owner] = PendingFastRedeemRequest(shares + currentPendingShares, block.timestamp, receiver);
 
         emit FastRedeemRequested(owner, receiver, shares, block.timestamp);
@@ -592,7 +657,7 @@ contract RedemptionPipe is
 
         require(owner != address(0), "RedemptionPipe: unauthorized");
         require(shares >= $.MIN_AMOUNT_SHARES, "RedemptionPipe: shares below minimum");
-        require($.shareManager.balanceOf(msg.sender) >= shares, "RedemptionPipe: insufficient shares");
+        require($.shareManager.balanceOf(owner) >= shares, "RedemptionPipe: insufficient shares");
 
         // Check authorization: msg.sender must be owner or operator of owner
         require(
@@ -617,12 +682,18 @@ contract RedemptionPipe is
             "RedemptionPipe: maximum redeem per user exceeded"
         );
 
+        if (currentPendingShares > 0) {
+            require(request.receiver == receiver, "RedemptionPipe: receiver mismatch");
+        }
+
         // Transfer shares to this contract for custody
-        $.shareManager.transferFrom(msg.sender, address(this), shares);
+        $.shareManager.transferFrom(owner, address(this), shares);
 
         // Add to pending
         request.shares = shares + currentPendingShares;
-        request.receiver = receiver;
+        if (currentPendingShares == 0) {
+            request.receiver = receiver;
+        }
 
         emit RedeemRequested(owner, receiver, shares);
         return REQUEST_ID;

@@ -78,11 +78,41 @@ contract OVaultComposerMulti is
     event RemotePeerSet(address indexed oft, uint32 indexed srcEid, bytes32 remotePeer);
     event TimelockControllerSet(address indexed oldTimelock, address indexed newTimelock);
 
+    event DepositWithReferral(
+        address indexed depositor,
+        address indexed receiver,
+        uint256 assets,
+        uint256 shares,
+        bytes32 indexed referralCode
+    );
+
     /// @notice Modifier for timelock-protected functions
     modifier onlyTimelock() {
         OVaultComposerMultiStorage storage $ = _getOVaultComposerMultiStorage();
         require(msg.sender == $.timeLockController, "OVaultComposerMulti: only timelock");
         _;
+    }
+
+    // Structs for compose message parameters (used to avoid stack too deep)
+    struct DepositParams {
+        address targetAsset;
+        bytes32 receiver;
+        SendParam sendParam;
+        uint256 minMsgValue;
+        bytes32 feeRefundRecipient;
+        uint32 originEid; // Origin chain ID for multi-hop refund support
+        bytes32 referralCode; // Referral code for reward attribution
+    }
+
+    // Structs for compose message parameters (used to avoid stack too deep)
+    struct RedeemParams {
+        address receiver;
+        SendParam sendParam;
+        uint256 minMsgValue;
+        uint256 minAssets;
+        bytes32 feeRefundRecipient;
+        uint32 originEid;
+        bytes32 customData;
     }
 
     // Errors
@@ -199,6 +229,24 @@ contract OVaultComposerMulti is
      * @param _assetAmount Amount to deposit
      * @param _sendParam Cross-chain send parameters
      * @param _refundAddress Address for fee refunds
+     * @param _referralCode Referral code for reward attribution
+     */
+    function depositAssetAndSend(
+        address asset,
+        uint256 _assetAmount,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        bytes32 _referralCode
+    ) external payable whenNotPaused nonReentrant {
+        _depositAssetAndSend(asset, _assetAmount, _sendParam, _refundAddress, _referralCode);
+    }
+
+    /**
+     * @notice Deposit specific asset and send shares cross-chain (without referral)
+     * @param asset Asset address to deposit
+     * @param _assetAmount Amount to deposit
+     * @param _sendParam Cross-chain send parameters
+     * @param _refundAddress Address for fee refunds
      */
     function depositAssetAndSend(
         address asset,
@@ -206,12 +254,30 @@ contract OVaultComposerMulti is
         SendParam memory _sendParam,
         address _refundAddress
     ) external payable whenNotPaused nonReentrant {
+        _depositAssetAndSend(asset, _assetAmount, _sendParam, _refundAddress, bytes32(0));
+    }
+
+    /**
+     * @notice Internal implementation for deposit and cross-chain send
+     * @param asset Asset address to deposit
+     * @param _assetAmount Amount to deposit
+     * @param _sendParam Cross-chain send parameters
+     * @param _refundAddress Address for fee refunds
+     * @param _referralCode Referral code for reward attribution
+     */
+    function _depositAssetAndSend(
+        address asset,
+        uint256 _assetAmount,
+        SendParam memory _sendParam,
+        address _refundAddress,
+        bytes32 _referralCode
+    ) internal {
         OVaultComposerMultiStorage storage $ = _getOVaultComposerMultiStorage();
 
         address pipe = $.depositPipes[asset];
         if (pipe == address(0)) revert NoPipeForAsset(asset);
 
-        uint256 shares = IDepositPipe(pipe).deposit(_assetAmount, address(this), msg.sender);
+        uint256 shares = IDepositPipe(pipe).deposit(_assetAmount, address(this), msg.sender, _referralCode);
 
         _assertSlippage(shares, _sendParam.minAmountLD);
         _sendParam.amountLD = shares;
@@ -235,6 +301,10 @@ contract OVaultComposerMulti is
         
         // For direct calls (not via LayerZero), srcEid is the current chain (VAULT_EID)
         emit CrossChainDeposit(asset, msg.sender, shareRecipient, VAULT_EID, _sendParam.dstEid, _assetAmount, shares);
+
+        if (_referralCode != bytes32(0)) {
+            emit DepositWithReferral(msg.sender, shareRecipient, _assetAmount, shares, _referralCode);
+        }
 
         // Refund dust to user
         uint256 dust = shares - amountToSend;
@@ -366,35 +436,33 @@ contract OVaultComposerMulti is
         uint256 _amount,
         uint32 _srcEid
     ) internal {
-        (address targetAsset, bytes32 receiver, SendParam memory sendParam, uint256 minMsgValue, bytes32 feeRefundRecipient, ) =
-            abi.decode(_params, (address, bytes32, SendParam, uint256, bytes32, uint32));
+        DepositParams memory p = abi.decode(_params, (DepositParams));
 
         // Defense in depth: These validations are also performed by OVaultMsgInspector on the source chain
         // before sending. However, we keep them here as a safety net in case:
         // 1. MsgInspector is disabled/removed on the source OFT
         // 2. Messages arrive from unexpected sources
         // 3. Additional security layer following principle of "never trust external input"
-        require(receiver != bytes32(0), "OVaultComposerMulti: zero receiver");
-        if (sendParam.dstEid != 0) {
-            require(sendParam.to != bytes32(0), "OVaultComposerMulti: zero destination");
+        require(p.receiver != bytes32(0), "OVaultComposerMulti: zero receiver");
+        if (p.sendParam.dstEid != 0) {
+            require(p.sendParam.to != bytes32(0), "OVaultComposerMulti: zero destination");
         }
 
         // Validate msg.value
-        if (msg.value < minMsgValue) revert InsufficientMsgValue();
+        if (msg.value < p.minMsgValue) revert InsufficientMsgValue();
 
         OVaultComposerMultiStorage storage $ = _getOVaultComposerMultiStorage();
 
         // Get deposit pipe for asset
-        address pipe = $.depositPipes[targetAsset];
-        if (pipe == address(0)) revert NoPipeForAsset(targetAsset);
+        address pipe = $.depositPipes[p.targetAsset];
+        if (pipe == address(0)) revert NoPipeForAsset(p.targetAsset);
 
         // Verify _oftIn matches the registered OFT for this asset
-        if (_oftIn != $.assetOFTs[targetAsset]) revert InvalidOFT(_oftIn);
+        if (_oftIn != $.assetOFTs[p.targetAsset]) revert InvalidOFT(_oftIn);
 
         // When OFT receives tokens and triggers compose, it mints tokens directly to this composer
         // So tokens should already be in our balance
-        uint256 composerBalance = IERC20(targetAsset).balanceOf(address(this));
-        require(composerBalance >= _amount, "Insufficient balance in composer");
+        require(IERC20(p.targetAsset).balanceOf(address(this)) >= _amount, "Insufficient balance in composer");
 
         // Deposit through pipe
         address depositor = _composeFrom.bytes32ToAddress();
@@ -402,55 +470,69 @@ contract OVaultComposerMulti is
         // If cross-chain send is needed, mint shares to composer first
         // Otherwise mint directly to receiver (convert bytes32 to address for EVM delivery)
         address shareMintRecipient =
-            sendParam.dstEid != 0 ? address(this) : receiver.bytes32ToAddress();
+            p.sendParam.dstEid != 0 ? address(this) : p.receiver.bytes32ToAddress();
 
         // Approve exact amount for deposit
-        IERC20(targetAsset).forceApprove(pipe, _amount);
+        IERC20(p.targetAsset).forceApprove(pipe, _amount);
 
         uint256 shares = IDepositPipe(pipe).deposit(
             _amount,
             shareMintRecipient, // Mint to composer if cross-chain send, else to receiver
-            address(this) // Tokens are in composer, not original depositor
+            address(this), // Tokens are in composer, not original depositor
+            p.referralCode
         );
 
         // Determine share recipient: if cross-chain, use sendParam.to, otherwise use receiver
-        address shareRecipient = sendParam.dstEid != 0 
-            ? sendParam.to.bytes32ToAddress() 
-            : receiver.bytes32ToAddress();
+        address shareRecipient = p.sendParam.dstEid != 0
+            ? p.sendParam.to.bytes32ToAddress()
+            : p.receiver.bytes32ToAddress();
 
-        emit CrossChainDeposit(targetAsset, depositor, shareRecipient, _srcEid, sendParam.dstEid, _amount, shares);
+        emit CrossChainDeposit(p.targetAsset, depositor, shareRecipient, _srcEid, p.sendParam.dstEid, _amount, shares);
 
-        _assertSlippage(shares, sendParam.minAmountLD);
+        if (p.referralCode != bytes32(0)) {
+            emit DepositWithReferral(depositor, shareRecipient, _amount, shares, p.referralCode);
+        }
+
+        _assertSlippage(shares, p.sendParam.minAmountLD);
 
         // If sendParam is provided, send shares cross-chain
-        if (sendParam.dstEid != 0) {
-            sendParam.amountLD = shares;
-
-            // Quote OFT to get exact amount after dedusting
-            (,, OFTReceipt memory receipt) = IOFT(SHARE_OFT).quoteOFT(sendParam);
-            uint256 amountToSend = receipt.amountSentLD;
-
-            // Approve only the exact amount that will be sent
-            IERC20(SHARE_ERC20).forceApprove(SHARE_OFT, amountToSend);
-
-            // Update sendParam with the exact amount
-            sendParam.amountLD = amountToSend;
-            
-            // Use feeRefundRecipient if provided, otherwise fallback to depositor
-            address refundRecipient = feeRefundRecipient != bytes32(0)
-                ? feeRefundRecipient.bytes32ToAddress()
-                : depositor;
-
-            _send(SHARE_OFT, sendParam, refundRecipient);
-
-            // Refund dust to depositor
-            uint256 dust = shares - amountToSend;
-            if (dust > 0) {
-                IERC20(SHARE_ERC20).safeTransfer(depositor, dust);
-                emit DustRefunded(SHARE_ERC20, depositor, dust);
-            }
+        if (p.sendParam.dstEid != 0) {
+            _sendSharesCrossChain(p, shares, depositor);
         }
         // If no cross-chain send, shares are already at receiver address
+    }
+
+    /**
+     * @notice Internal helper to send shares cross-chain after deposit
+     * @param p Deposit parameters
+     * @param shares Amount of shares to send
+     * @param depositor Original depositor address for refunds
+     */
+    function _sendSharesCrossChain(DepositParams memory p, uint256 shares, address depositor) internal {
+        p.sendParam.amountLD = shares;
+
+        // Quote OFT to get exact amount after dedusting
+        (,, OFTReceipt memory receipt) = IOFT(SHARE_OFT).quoteOFT(p.sendParam);
+        uint256 amountToSend = receipt.amountSentLD;
+
+        // Approve only the exact amount that will be sent
+        IERC20(SHARE_ERC20).forceApprove(SHARE_OFT, amountToSend);
+
+        // Update sendParam with the exact amount
+        p.sendParam.amountLD = amountToSend;
+
+        // Use feeRefundRecipient if provided, otherwise fallback to depositor
+        address refundRecipient =
+            p.feeRefundRecipient != bytes32(0) ? p.feeRefundRecipient.bytes32ToAddress() : depositor;
+
+        _send(SHARE_OFT, p.sendParam, refundRecipient);
+
+        // Refund dust to depositor
+        uint256 dust = shares - amountToSend;
+        if (dust > 0) {
+            IERC20(SHARE_ERC20).safeTransfer(depositor, dust);
+            emit DustRefunded(SHARE_ERC20, depositor, dust);
+        }
     }
 
     /**
@@ -459,18 +541,17 @@ contract OVaultComposerMulti is
     function _handleRedeemShares(bytes32 _composeFrom, bytes memory _params, uint256 _shareAmount, uint32 _srcEid)
         internal
     {
-        (address receiver, SendParam memory sendParam, uint256 minMsgValue, uint256 minAssets, bytes32 feeRefundRecipient, ) =
-            abi.decode(_params, (address, SendParam, uint256, uint256, bytes32, uint32));
+        RedeemParams memory p = abi.decode(_params, (RedeemParams));
 
         // Defense in depth: These validations are also performed by OVaultMsgInspector on the source chain
         // before sending. We keep them here as a safety net (see _handleDepositAsset for rationale)
-        require(receiver != address(0), "OVaultComposerMulti: zero receiver");
-        if (sendParam.dstEid != 0) {
-            require(sendParam.to != bytes32(0), "OVaultComposerMulti: zero destination");
+        require(p.receiver != address(0), "OVaultComposerMulti: zero receiver");
+        if (p.sendParam.dstEid != 0) {
+            require(p.sendParam.to != bytes32(0), "OVaultComposerMulti: zero destination");
         }
 
         // Validate msg.value
-        if (msg.value < minMsgValue) revert InsufficientMsgValue();
+        if (msg.value < p.minMsgValue) revert InsufficientMsgValue();
 
         OVaultComposerMultiStorage storage $ = _getOVaultComposerMultiStorage();
 
@@ -481,49 +562,55 @@ contract OVaultComposerMulti is
         address redeemer = _composeFrom.bytes32ToAddress();
 
         // If cross-chain send is needed, redeem to composer first, otherwise to receiver
-        address assetReceiver = sendParam.dstEid != 0 ? address(this) : receiver;
+        address assetReceiver = p.sendParam.dstEid != 0 ? address(this) : p.receiver;
 
         // Composer owns the shares (received via LayerZero), so composer is the controller
-        uint256 assets = IRedemptionPipe($.redemptionPipe).redeem(_shareAmount, assetReceiver, address(this));
+        uint256 assets;
+        if (p.customData != bytes32(0)) {
+            assets = IRedemptionPipe($.redemptionPipe)
+                .redeemWithCustomData(_shareAmount, assetReceiver, address(this), p.customData);
+        } else {
+            assets = IRedemptionPipe($.redemptionPipe).redeem(_shareAmount, assetReceiver, address(this));
+        }
 
         // Check slippage
-        _assertSlippage(assets, minAssets);
+        _assertSlippage(assets, p.minAssets);
 
         // Determine asset recipient: if cross-chain, use sendParam.to, otherwise use receiver
-        address assetRecipient = sendParam.dstEid != 0 
-            ? sendParam.to.bytes32ToAddress() 
-            : receiver;
+        address assetRecipient = p.sendParam.dstEid != 0
+            ? p.sendParam.to.bytes32ToAddress()
+            : p.receiver;
 
-        emit CrossChainRedemption(redeemer, assetRecipient, _srcEid, sendParam.dstEid, _shareAmount, assets);
+        emit CrossChainRedemption(redeemer, assetRecipient, _srcEid, p.sendParam.dstEid, _shareAmount, assets);
 
         // If sendParam provided, send assets cross-chain
-        if (sendParam.dstEid != 0) {
-            sendParam.amountLD = assets;
+        if (p.sendParam.dstEid != 0) {
+            p.sendParam.amountLD = assets;
 
             // Calculate minimum after dust removal to protect against decimal conversion losses
-            sendParam.minAmountLD = _calculateMinAmountAfterDust(
+            p.sendParam.minAmountLD = _calculateMinAmountAfterDust(
                 $.underlyingAssetOFT,
                 assets,
-                minAssets
+                p.minAssets
             );
 
             // Quote OFT to get exact amount after dedusting
-            (,, OFTReceipt memory receipt) = IOFT($.underlyingAssetOFT).quoteOFT(sendParam);
+            (,, OFTReceipt memory receipt) = IOFT($.underlyingAssetOFT).quoteOFT(p.sendParam);
             uint256 amountToSend = receipt.amountSentLD;
 
             // Approve only the exact amount that will be sent
             IERC20($.underlyingAsset).forceApprove($.underlyingAssetOFT, amountToSend);
 
             // Update sendParam with the exact amount
-            sendParam.amountLD = amountToSend;
+            p.sendParam.amountLD = amountToSend;
             
             
             // Use feeRefundRecipient if provided, otherwise fallback to redeemer
-            address refundRecipient = feeRefundRecipient != bytes32(0)
-                ? feeRefundRecipient.bytes32ToAddress()
+            address refundRecipient = p.feeRefundRecipient != bytes32(0)
+                ? p.feeRefundRecipient.bytes32ToAddress()
                 : redeemer;
 
-            _send($.underlyingAssetOFT, sendParam, refundRecipient);
+            _send($.underlyingAssetOFT, p.sendParam, refundRecipient);
 
             // Refund dust to redeemer
             uint256 dust = assets - amountToSend;
